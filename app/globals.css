@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer base {
+  :root {
+    --background: var(--bg-base);
+    --foreground: var(--text-primary);
+    --card: var(--surface-card);
+    --card-foreground: var(--text-primary);
+    --primary: var(--mentor-blue);
+    --primary-foreground: #FFFFFF;
+    --muted: #EFEDE7;
+    --muted-foreground: var(--text-muted);
+    --border: #E4E1D8;
+    --input: #E4E1D8;
+    --ring: var(--mentor-blue);
+    --radius: 0.75rem;
+
+    /* UrPaisa product tokens — DESIGN_PLAN.md §2.1 */
+    --bg-base: #F6F5F1;
+    --surface-card: #FFFFFF;
+    --text-primary: #2B2A28;
+    --text-muted: #6B6A65;
+    --zone-green: #14A97C;
+    --zone-green-bg: #E4F6EF;
+    --zone-yellow: #D69A1E;
+    --zone-yellow-bg: #FBF1DC;
+    --zone-red: #E06B5A;
+    --zone-red-bg: #FBEAE6;
+    --zone-locked: #6B7A99;
+    --zone-locked-bg: #EAEDF3;
+    --mentor-blue: #4C7EF3;
+    --mentor-blue-bg: #EBF1FE;
+    --radius-lg: 1.25rem;
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-bg-base text-text-primary;
+  }
+  html {
+    @apply font-sans;
+  }
+}

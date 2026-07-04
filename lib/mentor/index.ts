@@ -1,0 +1,5 @@
+export { answerMentor } from "./ask"
+export { detectIntent, parseAmount } from "./intent"
+export { computeAffordability } from "./affordability"
+export { buildBaseAnswer } from "./fallback"
+export type { MentorAnswer, MentorIntent, AffordVerdict, BaseAnswer, MentorContext } from "./types"

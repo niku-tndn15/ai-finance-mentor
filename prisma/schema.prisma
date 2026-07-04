@@ -1,0 +1,441 @@
+// Milestone 0: datasource + generator scaffolding.
+// Milestone 1 (TECH_STACK.md §4.1): User, OtpCode, Session auth models.
+// Milestone 2 adds the financial model entities (Profile, Income, ...).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Pooled (pgbouncer, port 6543) for the running app — TECH_STACK.md §6.
+  url       = env("DATABASE_URL")
+  // Direct (port 5432) for migrations — TECH_STACK.md §6.
+  directUrl = env("DIRECT_URL")
+}
+
+// Why a code enum instead of free text: the two OTP purposes drive different
+// post-verify behaviour (signup verification vs. password reset), so they must
+// be a closed set — TECH_STACK.md §4.5 / §4.1.
+enum OtpPurpose {
+  signup_verification
+  password_reset
+}
+
+// A person's account. `passwordHash` and `emailVerifiedAt` are nullable because
+// a User row is created at email-capture time (Milestone 1 signup step 1),
+// before the email is verified or a password is set — TECH_STACK.md §4.2.
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  passwordHash    String? // bcrypt hash — never plaintext (TECH_STACK.md §4.5)
+  emailVerifiedAt DateTime?
+
+  // Login lockout counters (DB-counter based rate limiting — TECH_STACK.md §4.5).
+  failedLoginCount  Int       @default(0)
+  lastFailedLoginAt DateTime?
+  lockedUntil       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  otpCodes OtpCode[]
+  sessions Session[]
+
+  // Milestone 2 financial model relations.
+  profile       Profile?
+  income        Income?
+  fixedExpenses FixedExpense[]
+  subscriptions Subscription[]
+  goals         Goal[]
+  debts         Debt[]
+
+  // Milestone 4 shared action storage (reused by M5/M6).
+  actionRecords ActionRecord[]
+
+  // Milestone 5 daily nudges.
+  nudges Nudge[]
+
+  // Milestone 8 weekly reflections.
+  reflections Reflection[]
+
+  // Milestone 8 monthly resets (deferred piece, built in M10 window).
+  monthlyResets MonthlyReset[]
+
+  @@index([email])
+}
+
+// A hashed one-time code. We store only the hash (§4.2) so a DB leak never
+// exposes a usable code. `attemptCount` enforces the max-5-wrong-tries rule and
+// `consumedAt` makes a code single-use.
+model OtpCode {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email        String // denormalised for resend/hourly-cap lookups
+  codeHash     String
+  purpose      OtpPurpose
+  expiresAt    DateTime
+  attemptCount Int        @default(0)
+  consumedAt   DateTime?
+  createdAt    DateTime   @default(now())
+
+  @@index([userId, purpose])
+  @@index([email, purpose, createdAt])
+}
+
+// A DB-backed session (TECH_STACK.md §4.4 — chosen over stateless JWT so it can
+// be revoked instantly). The cookie carries a random token; we store only its
+// SHA-256 hash here.
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 2 — Financial Situation Model (PRD 02 §2–§5, onboarding PRD 01 §6).
+// All amounts are whole INR rupees stored as Int (no paise in Phase 1 — manual
+// entry, and the safe-to-use maths rounds to rupees anyway). Every entity hangs
+// off User via userId so the model in lib/financial-model/ can load a user's
+// whole situation in one pass.
+// ---------------------------------------------------------------------------
+
+// Onboarding PRD 01 §6: "working professional, student with income,
+// freelancer/gig worker, other".
+enum UserType {
+  working_professional
+  student_with_income
+  freelancer_gig
+  other
+}
+
+// Onboarding PRD 01 §6: "fixed salary, variable income, mixed income".
+enum IncomeType {
+  fixed_salary
+  variable_income
+  mixed_income
+}
+
+// Financial model PRD 02 §2 income stability. Derived from IncomeType at setup
+// time (fixed→high, mixed→medium, variable→low) so onboarding stays short, but
+// stored explicitly because it drives allocation/buffer guidance downstream.
+enum IncomeStability {
+  high
+  medium
+  low
+}
+
+// The day-to-day coaching voice picked during onboarding.
+enum CoachingTone {
+  friendly
+  direct
+  strict
+  calm
+  motivational
+}
+
+// PRD 02 §3 — each fixed cost is either non-negotiable (rent, EMIs) or
+// semi-negotiable (a streaming subscription).
+enum ExpenseNegotiability {
+  non_negotiable
+  semi_negotiable
+}
+
+// PRD 02 §4 — how movable a goal's timeline/amount is.
+enum GoalFlexibility {
+  fixed
+  flexible
+}
+
+// PRD 04 §2 "Goal type" + §3 default priority ordering. The categories are the
+// buckets §3 ranks (emergency fund → essential obligations → time-bound →
+// lifestyle → investing readiness). High-interest debt — §3's rank 2 — is a Debt
+// entity, not a goal category, so it isn't listed here. Nullable on Goal so goals
+// created before this field (M2 onboarding) still load; the coach treats an
+// uncategorised goal as the lowest-priority bucket.
+enum GoalCategory {
+  emergency_fund
+  essential_obligation
+  time_bound
+  lifestyle
+  investing
+}
+
+// PRD 04 §8 / IMPLEMENTATION_PLAN.md M4 — the shared Done / Skip / Remind-me-later
+// response. A closed set (drives M6 habit learning), so it's an enum.
+enum ActionResponse {
+  done
+  skipped
+  remind_later
+}
+
+// PRD 05 §3 behavioural nudge types, plus two structural ones so every §4 trigger
+// priority has a home: `low_money` (§4 rank 2, low/negative safe-to-use) and
+// `safe_spend` (§4 rank 9, the general weekly fallback nudge).
+enum NudgeType {
+  payday
+  weekend
+  subscription
+  goal
+  debt
+  impulse
+  low_money
+  safe_spend
+}
+
+// PRD 02 §5 debt types.
+enum DebtType {
+  credit_card
+  personal_loan
+  education_loan
+  vehicle_loan
+  bnpl
+  informal
+  other
+}
+
+// Shared low/medium/high scale for a debt's late-fee risk and emotional stress
+// level (PRD 02 §5).
+enum RiskLevel {
+  low
+  medium
+  high
+}
+
+// Onboarding answers (PRD 01 §6 Onboarding Screen). One per user.
+model Profile {
+  id           String       @id @default(cuid())
+  userId       String       @unique
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userType     UserType
+  incomeType   IncomeType
+  coachingTone CoachingTone
+  primaryGoal  String? // free-text headline goal from onboarding, for tone/context
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// The user's monthly money-in picture (PRD 02 §2) plus the planned-savings
+// figure from Financial Setup, kept together because safe-to-use money is
+// income − fixed − planned savings (PRD 02 §6). One per user.
+model Income {
+  id              String          @id @default(cuid())
+  userId          String          @unique
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  monthlyAmount   Int
+  payday          Int // day of month (1–31)
+  stability       IncomeStability
+  plannedSavings  Int             @default(0)
+  // Deferred-but-modelled §2 fields (nullable — not collected in MVP setup).
+  irregularIncome Int?
+  bonusIncome     Int?
+  expectedChange  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// A must-pay recurring cost (PRD 02 §3). Many per user.
+model FixedExpense {
+  id            String               @id @default(cuid())
+  userId        String
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category      String
+  amount        Int
+  negotiability ExpenseNegotiability @default(non_negotiable)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// A recurring subscription (PRD 02 §3 / setup screen). Split from FixedExpense
+// so subscription-cleanup nudges (Milestone 5) can target them directly.
+model Subscription {
+  id            String               @id @default(cuid())
+  userId        String
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  amount        Int
+  negotiability ExpenseNegotiability @default(semi_negotiable)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// A savings goal (PRD 02 §4). Many per user.
+model Goal {
+  id                  String          @id @default(cuid())
+  userId              String
+  user                User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String
+  category            GoalCategory? // PRD 04 §2 "Goal type"; drives §3 default ordering
+  targetAmount        Int
+  currentSavings      Int             @default(0)
+  deadline            DateTime?
+  priority            Int? // lower number = higher priority; null = use default ordering
+  flexibility         GoalFlexibility @default(flexible)
+  monthlyContribution Int? // derived (target−current)/months, or user-set
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 4 — shared action storage (IMPLEMENTATION_PLAN.md M4: "one
+// component, one storage schema", reused by the nudge engine (M5) and the habit
+// learning loop (M6)). One row per Done/Skip/Remind-me-later response the user
+// gives to a recommended action.
+//
+// `category` is a plain String, not an enum, on purpose: M4 logs goal / debt /
+// save-vs-debt actions, but M5 adds new nudge categories (payday, weekend,
+// subscription, impulse …). A String avoids an enum migration every time a new
+// nudge type ships. `actionKey` is a stable id for the *specific* recommendation
+// (e.g. "debt-payoff:<debtId>") so M6 can count repeated responses to the same
+// action. goalId/debtId are soft references (no FK) so history survives the goal
+// or debt being deleted — the learning loop still wants that record.
+// ---------------------------------------------------------------------------
+model ActionRecord {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category  String
+  actionKey String
+  label     String // human-readable action text at the time it was logged
+  response  ActionResponse
+  remindAt  DateTime? // set when response = remind_later
+  goalId    String? // soft reference (no FK) — see block comment
+  debtId    String? // soft reference (no FK) — see block comment
+  createdAt DateTime       @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, category])
+  @@index([userId, actionKey])
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 5 — the daily nudge (PRD 05). One primary nudge per user per day
+// (§6), generated by the Netlify scheduled function or lazily on first view.
+// `forDate` + the unique index enforce the one-per-day rule. The nudge stores the
+// full anatomy (§5): trigger, action, reason, expected benefit. `action`/`reason`
+// hold the final display text — AI-phrased when `aiPhrased` is true, otherwise the
+// deterministic fallback template (§7 / §8). `actionKey`/`category`/`goalId`/
+// `debtId` link a response to the shared ActionRecord storage from M4.
+// ---------------------------------------------------------------------------
+model Nudge {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  forDate         DateTime  @db.Date
+  type            NudgeType
+  trigger         String
+  action          String
+  reason          String
+  expectedBenefit String
+  actionKey       String
+  category        String
+  goalId          String?
+  debtId          String?
+  aiPhrased       Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+
+  @@unique([userId, forDate])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 8 — the weekly reflection (PRD 08 §2). One per user per week
+// (weekStart = that week's Monday), generated by the Netlify weekly scheduled
+// function or lazily on first view. All content is derived from real Done/Skip/
+// Remind-later history (M4–M6), never placeholder. `nextAction*` links the one
+// recommended action to the shared M4 ActionRecord storage. The challenge fields
+// are the optional MVP-plus habit challenge (§4/§5) and may be null.
+// ---------------------------------------------------------------------------
+model Reflection {
+  id                 String   @id @default(cuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weekStart          DateTime @db.Date
+  completed          Int
+  total              Int
+  summary            String
+  pattern            String
+  nextAction         String
+  nextActionCategory String
+  nextActionKey      String
+  goalProgress       String
+  habitInsight       String
+  challengeTitle     String?
+  challengeDetail    String?
+  aiPhrased          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+
+  @@unique([userId, weekStart])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 8 — the lightweight monthly reset (PRD 08 §3). One per user per
+// month (monthStart = the 1st of that month), generated by the Netlify monthly
+// scheduled function or lazily on first view. MVP is deliberately lightweight:
+// derived from manual inputs + nudge history (no transaction data), and it stays
+// consistent with the M3 safe-to-use engine and the M4 coach (§7). Each String
+// field answers one of the six §3 questions; `nextAction*` links the one
+// recommended change to the shared M4 ActionRecord storage.
+// ---------------------------------------------------------------------------
+model MonthlyReset {
+  id                 String   @id @default(cuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  monthStart         DateTime @db.Date
+  summary            String // headline check-in (AI-phrasable)
+  overspend          String // "Did I overspend?"
+  savings            String // "Did I save enough?"
+  biggestLeak        String // "Which category or behavior hurt me most?"
+  goalMovement       String // "Which goal moved forward?"
+  changeNextMonth    String // "What should I change next month?"
+  safeToUseNextMonth Int // safe-to-use money for next month (consistent with M3)
+  safeToUseSummary   String // plain-language version of the number above
+  nextAction         String
+  nextActionCategory String
+  nextActionKey      String
+  aiPhrased          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+
+  @@unique([userId, monthStart])
+  @@index([userId])
+}
+
+// A debt item (PRD 02 §5). Many per user. Interest rate is a percentage
+// (e.g. 36.0 for a 36% credit card).
+model Debt {
+  id             String     @id @default(cuid())
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           DebtType
+  outstanding    Int
+  interestRate   Float?
+  minimumPayment Int?
+  dueDate        DateTime?
+  lateFeeRisk    RiskLevel?
+  stressLevel    RiskLevel?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
