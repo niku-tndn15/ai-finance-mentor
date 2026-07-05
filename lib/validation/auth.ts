@@ -36,10 +36,20 @@ export const nameSchema = z
 
 // --- Request body schemas (one per endpoint) ---
 
-export const signupSchema = z.object({
-  name: nameSchema,
-  email: emailSchema,
-})
+// Signup captures name, email and password in one step (no email OTP). The
+// confirm field is validated here so the client and server agree the two
+// passwords match before an account is created.
+export const signupSchema = z
+  .object({
+    name: nameSchema,
+    email: emailSchema,
+    password: passwordSchema,
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: "Passwords don't match",
+    path: ["confirmPassword"],
+  })
 
 export const verifyOtpSchema = z.object({
   email: emailSchema,

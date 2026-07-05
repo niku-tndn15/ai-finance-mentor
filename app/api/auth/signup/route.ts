@@ -1,50 +1,54 @@
 import { prisma } from "@/lib/db"
-import { issueOtp } from "@/lib/auth/issue-otp"
+import { hashPassword } from "@/lib/auth/password"
+import { createSession } from "@/lib/auth/session"
+import { getClientIp, getUserAgent } from "@/lib/auth/request"
 import { fail, ok, parseBody } from "@/lib/http"
 import { signupSchema } from "@/lib/validation/auth"
 
-// Signup step 1: email capture (IMPLEMENTATION_PLAN.md M1).
-// Creates or reuses an unverified User, then issues a signup OTP.
+// Signup (IMPLEMENTATION_PLAN.md M1). Single step: name + email + password.
+// Email OTP verification has been removed, so we create the account with the
+// password hash, mark the email as verified up front (so login's verification
+// check passes), open a session, and send the user straight to onboarding.
 export async function POST(req: Request) {
   const parsed = await parseBody(req, signupSchema)
   if (!parsed.ok) return parsed.response
-  const { name, email } = parsed.data
+  const { name, email, password } = parsed.data
 
   try {
     const existing = await prisma.user.findUnique({ where: { email } })
 
-    // If a fully-set-up account already exists, steer them to login. We reveal
-    // this only for a completed account; unverified stubs are safe to reuse.
+    // A completed account already exists — steer them to login rather than
+    // silently overwriting their password.
     if (existing?.passwordHash) {
       return fail("An account with this email already exists. Please log in instead.", 409, {
         code: "account_exists",
       })
     }
 
-    const user = existing ?? (await prisma.user.create({ data: { email, name } }))
+    const passwordHash = await hashPassword(password)
+    const now = new Date()
 
-    // Keep the latest name if they retyped it.
-    if (existing && name && existing.name !== name) {
-      await prisma.user.update({ where: { id: user.id }, data: { name } })
-    }
+    // Reuse any leftover unverified stub (e.g. from the old OTP flow) instead of
+    // colliding on the unique email; otherwise create a fresh user.
+    const user = existing
+      ? await prisma.user.update({
+          where: { id: existing.id },
+          data: { name, passwordHash, emailVerifiedAt: existing.emailVerifiedAt ?? now },
+        })
+      : await prisma.user.create({
+          data: { name, email, passwordHash, emailVerifiedAt: now },
+        })
 
-    const issued = await issueOtp({
-      userId: user.id,
-      email,
-      purpose: "signup_verification",
-      name,
+    await createSession(user.id, {
+      userAgent: getUserAgent(req),
+      ip: getClientIp(req),
     })
 
-    if (!issued.ok) {
-      return fail("Please wait a moment before requesting another code.", 429, {
-        retryAfterSeconds: issued.retryAfterSeconds,
-      })
-    }
-
-    return ok({ email })
+    // New account → straight into the questionnaire.
+    return ok({ redirect: "/onboarding" })
   } catch (error) {
     console.error("[auth/signup] failed", error)
-    return fail("We couldn't start signup right now. Please try again in a moment.", 503, {
+    return fail("We couldn't create your account right now. Please try again in a moment.", 503, {
       code: "signup_unavailable",
     })
   }

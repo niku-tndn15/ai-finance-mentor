@@ -7,6 +7,7 @@ import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { PasswordField } from "@/components/auth/password-field"
 import { postJson } from "@/lib/client/api"
 import { signupSchema } from "@/lib/validation/auth"
 
@@ -14,6 +15,8 @@ export default function SignupPage() {
   const router = useRouter()
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -22,14 +25,14 @@ export default function SignupPage() {
     setError(null)
 
     // Validate with the same schema the server uses (single source of truth).
-    const parsed = signupSchema.safeParse({ name, email })
+    const parsed = signupSchema.safeParse({ name, email, password, confirmPassword })
     if (!parsed.success) {
       setError(parsed.error.issues[0].message)
       return
     }
 
     setSubmitting(true)
-    const res = await postJson("/api/auth/signup", parsed.data)
+    const res = await postJson<{ redirect?: string }>("/api/auth/signup", parsed.data)
     setSubmitting(false)
 
     if (!res.ok) {
@@ -37,7 +40,8 @@ export default function SignupPage() {
       return
     }
 
-    router.push(`/verify-otp?email=${encodeURIComponent(parsed.data.email)}`)
+    // Account created and signed in → straight into the questionnaire.
+    router.push(res.data.redirect ?? "/onboarding")
   }
 
   return (
@@ -73,10 +77,25 @@ export default function SignupPage() {
           />
         </div>
 
+        <PasswordField
+          id="password"
+          label="Password"
+          value={password}
+          onChange={setPassword}
+          showChecklist
+        />
+
+        <PasswordField
+          id="confirmPassword"
+          label="Confirm password"
+          value={confirmPassword}
+          onChange={setConfirmPassword}
+        />
+
         {error && <p className="text-sm text-zone-red">{error}</p>}
 
         <Button type="submit" size="lg" className="mt-2 w-full" disabled={submitting}>
-          {submitting ? "Sending code…" : "Continue"}
+          {submitting ? "Creating account…" : "Create account"}
         </Button>
       </form>
 
