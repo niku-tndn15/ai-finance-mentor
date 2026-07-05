@@ -7,11 +7,11 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  // Pooled (pgbouncer, port 6543) for the running app — TECH_STACK.md §6.
-  url       = env("DATABASE_URL")
-  // Direct (port 5432) for migrations — TECH_STACK.md §6.
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
+  // Pooled (pgbouncer, port 6543) for the running app and Netlify builds.
+  // Keep deploys dependent on DATABASE_URL only; migrations can still be run
+  // from a shell with a direct database URL when needed.
+  url      = env("DATABASE_URL")
 }
 
 // Why a code enum instead of free text: the two OTP purposes drive different
